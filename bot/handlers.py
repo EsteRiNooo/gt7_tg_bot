@@ -3,8 +3,8 @@ from aiogram.filters import Command
 from aiogram.types import FSInputFile, InputMediaPhoto, Message
 
 from scheduler import send_weekly_races
-from services.formatting import format_full_week
-from services.races import get_current_races
+from services.formatting import append_source_errors, format_full_week
+from services.races import get_current_races_with_errors
 from services.subscribers import add_subscriber
 from services.track_images import find_track_image
 
@@ -29,8 +29,10 @@ async def start_handler(message: Message) -> None:
 
 @router.message(Command("current"))
 async def current_handler(message: Message) -> None:
-    races = _ordered_races(get_current_races())
+    races, errors = await get_current_races_with_errors()
+    races = _ordered_races(races)
     full_text = format_full_week(races)
+    full_text = append_source_errors(full_text, errors)
 
     image_paths = [find_track_image((race.get("track") or "").strip()) for race in races]
     valid_image_paths = [path for path in image_paths if path]

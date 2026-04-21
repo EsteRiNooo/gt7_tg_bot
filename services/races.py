@@ -18,5 +18,30 @@ async def get_all_races() -> list[dict]:
     return results
 
 
-def get_current_races() -> list[dict[str, str | int | None]]:
-    return GT7Parser().get_races_sync()
+async def get_current_races_with_errors() -> tuple[
+    list[dict[str, str | int | None]], list[dict[str, str]]
+]:
+    results = await get_all_races()
+    valid_sources = [result for result in results if result["data"] is not None]
+    errors = [
+        {
+            "source": str(result["source"]),
+            "error": str(result["error"]),
+        }
+        for result in results
+        if result["error"]
+    ]
+
+    gt7_source = next((result for result in valid_sources if result["source"] == "gt7"), None)
+    if gt7_source is not None:
+        return gt7_source["data"], errors
+
+    if valid_sources:
+        return valid_sources[0]["data"], errors
+
+    return [], errors
+
+
+async def get_current_races() -> list[dict[str, str | int | None]]:
+    races, _ = await get_current_races_with_errors()
+    return races

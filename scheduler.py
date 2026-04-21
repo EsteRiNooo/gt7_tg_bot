@@ -7,8 +7,8 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import FSInputFile, InputMediaPhoto
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from services.formatting import format_full_week
-from services.races import get_current_races
+from services.formatting import append_source_errors, format_full_week
+from services.races import get_current_races_with_errors
 from services.subscribers import list_subscribers, remove_subscriber
 from services.track_images import find_track_image
 
@@ -70,7 +70,8 @@ def _ordered_races(races: list[dict[str, str | None]]) -> list[dict[str, str | N
 async def send_weekly_races(bot: Bot, force: bool = False) -> None:
     print("Checking weekly races...")
 
-    races = _ordered_races(get_current_races())
+    races, errors = await get_current_races_with_errors()
+    races = _ordered_races(races)
     races_hash = _build_race_hash(races)
     old_hash = _read_last_hash()
 
@@ -88,7 +89,7 @@ async def send_weekly_races(bot: Bot, force: bool = False) -> None:
     sent_any = False
     for user_id in user_ids:
         try:
-            await _send_weekly_message(bot=bot, user_id=user_id, races=races)
+            await _send_weekly_message(bot=bot, user_id=user_id, races=races, errors=errors)
             sent_any = True
         except TelegramForbiddenError:
             remove_subscriber(user_id)
@@ -103,9 +104,10 @@ async def send_weekly_races(bot: Bot, force: bool = False) -> None:
 
 
 async def _send_weekly_message(
-    bot: Bot, user_id: int, races: list[dict[str, str | None]]
+    bot: Bot, user_id: int, races: list[dict[str, str | None]], errors: list[dict[str, str]]
 ) -> None:
     full_text = format_full_week(races)
+    full_text = append_source_errors(full_text, errors)
     image_paths = [find_track_image((race.get("track") or "").strip()) for race in races]
     valid_image_paths = [path for path in image_paths if path]
 

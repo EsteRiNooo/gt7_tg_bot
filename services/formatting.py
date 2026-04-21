@@ -48,3 +48,18 @@ def format_full_week(races: list[dict[str, str | int | None]]) -> str:
             lines.extend(["", "➖➖➖➖➖➖", ""])
 
     return "\n".join(lines).rstrip()
+
+
+def append_source_errors(
+    full_text: str, errors: list[dict[str, str]] | None
+) -> str:
+    if not errors:
+        return full_text
+
+    lines = [full_text, "", "⚠ Some sources failed:"]
+    for item in errors:
+        source = escape((item.get("source") or "unknown").strip())
+        error = escape((item.get("error") or "unknown error").strip())
+        lines.append(f"- {source}: {error}")
+
+    return "\n".join(lines).rstrip()
