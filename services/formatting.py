@@ -1,7 +1,7 @@
 from datetime import date, timedelta
 from html import escape
 
-from services.races import is_single_car
+from services.utils import is_single_car
 
 
 def get_week_range() -> str:
