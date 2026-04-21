@@ -5,6 +5,7 @@ from typing import Any
 import requests
 
 from services.parsers.base import BaseParser
+from services.races_logging import ensure_races_logging_configured, logger
 
 LMU_SCHEDULES_URL = "https://api.lmuschedule.com/racingschedules"
 REQUEST_TIMEOUT_SECONDS = 10
@@ -161,6 +162,8 @@ class LMUOfficialParser(BaseParser):
         return self.get_races_sync()
 
     def get_races_sync(self) -> list[dict[str, Any]]:
+        ensure_races_logging_configured()
+        logger.info("[LMU] start parsing")
         try:
             response = requests.get(
                 LMU_SCHEDULES_URL,
@@ -170,22 +173,31 @@ class LMUOfficialParser(BaseParser):
             if response.status_code != 200:
                 print(f"LMU official API status code: {response.status_code}")
             response.raise_for_status()
+            logger.info("[LMU] payload received")
             payload = response.json()
         except requests.RequestException as error:
+            logger.error(f"[LMU] error: {error}")
             print(f"LMU official API request error: {error}")
             raise
         except ValueError as error:
+            logger.error(f"[LMU] error: {error}")
             print(f"LMU official API JSON parse error: {error}")
             raise
 
         if not isinstance(payload, dict) or "body" not in payload:
             print("LMU official API returned invalid wrapped payload")
-            raise ValueError("invalid LMU API payload")
+            err = ValueError("invalid LMU API payload")
+            logger.error(f"[LMU] error: {err}")
+            raise err
         data = payload["body"]
         if not isinstance(data, list):
             print("LMU official API returned non-list body payload")
-            raise ValueError("invalid LMU API payload")
+            err = ValueError("invalid LMU API payload")
+            logger.error(f"[LMU] error: {err}")
+            raise err
         print(f"LMU API returned {len(data)} races")
+
+        logger.info(f"[LMU] parsed items: {len(data)}")
 
         now_local = datetime.now().astimezone()
         races: list[dict[str, Any]] = []
@@ -269,5 +281,9 @@ class LMUOfficialParser(BaseParser):
                     "uid": _build_uid("lmu", title, track),
                 }
             )
+
+        logger.info(f"[LMU] normalized races: {len(races)}")
+        if not races:
+            logger.warning("[LMU] no races generated")
 
         return races

@@ -4,6 +4,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from services.parsers.base import BaseParser
+from services.races_logging import ensure_races_logging_configured, logger
 
 DAILIES_URL = "https://www.dg-edge.com/events/dailies"
 REQUEST_TIMEOUT_SECONDS = 10
@@ -83,6 +84,8 @@ class GT7Parser(BaseParser):
         return self.get_races_sync()
 
     def get_races_sync(self) -> list[dict[str, str | int | None]]:
+        ensure_races_logging_configured()
+        logger.info("[GT7] start parsing")
         print("=== FETCHING REAL DATA ===")
 
         try:
@@ -92,16 +95,24 @@ class GT7Parser(BaseParser):
                 headers=REQUEST_HEADERS,
             )
             response.raise_for_status()
+            logger.info("[GT7] payload received")
             print("Status code:", response.status_code)
             print(response.text[:1000])
         except requests.RequestException as error:
+            logger.error(f"[GT7] error: {error}")
             print("Request error:", error)
             print("FALLBACK TRIGGERED")
-            return _fallback_races()
+            logger.info("[GT7] parsed items: 0")
+            races_fb = _fallback_races()
+            logger.info(f"[GT7] normalized races: {len(races_fb)}")
+            if not races_fb:
+                logger.warning("[GT7] no races generated")
+            return races_fb
 
         try:
             soup = BeautifulSoup(response.text, "html.parser")
             cards = soup.select('a[href^="/events/dailies/"]')
+            logger.info(f"[GT7] parsed items: {len(cards)}")
             print("Found race cards:", len(cards))
             if len(cards) == 0:
                 print("No race cards found. Selectors likely incorrect.")
@@ -198,11 +209,23 @@ class GT7Parser(BaseParser):
             if len(races) == 3:
                 race_order = {"Race A": 0, "Race B": 1, "Race C": 2}
                 races.sort(key=lambda race: race_order.get((race.get("title") or ""), 99))
+                logger.info(f"[GT7] normalized races: {len(races)}")
+                if not races:
+                    logger.warning("[GT7] no races generated")
                 return races
 
             print("FALLBACK TRIGGERED")
-            return _fallback_races()
+            races_fb = _fallback_races()
+            logger.info(f"[GT7] normalized races: {len(races_fb)}")
+            if not races_fb:
+                logger.warning("[GT7] no races generated")
+            return races_fb
         except Exception as error:
+            logger.error(f"[GT7] error: {error}")
             print("Parsing error:", error)
             print("FALLBACK TRIGGERED")
-            return _fallback_races()
+            races_fb = _fallback_races()
+            logger.info(f"[GT7] normalized races: {len(races_fb)}")
+            if not races_fb:
+                logger.warning("[GT7] no races generated")
+            return races_fb
