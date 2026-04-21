@@ -1,9 +1,11 @@
 from services.parsers.gt7 import GT7Parser
+from services.parsers.lmu_official import LMUOfficialParser
 
 
 async def get_all_races() -> list[dict]:
     parsers = [
         GT7Parser(),
+        LMUOfficialParser(),
     ]
 
     results = []
