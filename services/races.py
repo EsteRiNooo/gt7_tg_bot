@@ -9,6 +9,47 @@ DATE_RANGE_RE = re.compile(
     r"\d{1,2}\s+[A-Za-z]+\s+\d{4}\s*-\s*\d{1,2}\s+[A-Za-z]+\s+\d{4}"
 )
 
+def _slugify(value: str | None) -> str:
+    if not value:
+        return ""
+    normalized = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+    return re.sub(r"_+", "_", normalized)
+
+
+def _build_uid(game: str | None, race: str | None, track: str | None) -> str:
+    parts = [_slugify(game), _slugify(race), _slugify(track)]
+    return "_".join(part for part in parts if part)
+
+
+def _normalized_race(
+    *,
+    title: str | None = None,
+    track: str | None = None,
+    race_class: str | None = None,
+    car: str | None = None,
+    laps: int | None = None,
+    tires: str | None = None,
+) -> dict[str, str | int | None]:
+    game = "GT7"
+    race_type = "weekly"
+    uid = _build_uid(game, title, track)
+    return {
+        "game": game,
+        "source": "dg-edge",
+        "type": race_type,
+        "title": title,
+        "track": track,
+        "layout": None,
+        "class": race_class,
+        "car": car,
+        "laps": laps,
+        "duration": None,
+        "tires": tires,
+        "start_time": None,
+        "uid": uid,
+    }
+
+
 def is_single_car(car: str) -> bool:
     value = car.lower()
     blocked_tokens = ("gr.", "cars", "group", "multiple")
@@ -17,30 +58,9 @@ def is_single_car(car: str) -> bool:
 
 def _fallback_races() -> list[dict[str, str | int | None]]:
     return [
-        {
-            "title": "Race A",
-            "track": "Tsukuba",
-            "class": "Road Cars",
-            "car": None,
-            "tires": None,
-            "laps": None,
-        },
-        {
-            "title": "Race B",
-            "track": "Spa",
-            "class": "Gr.4",
-            "car": None,
-            "tires": None,
-            "laps": None,
-        },
-        {
-            "title": "Race C",
-            "track": "Suzuka",
-            "class": "Gr.3",
-            "car": None,
-            "tires": None,
-            "laps": None,
-        },
+        _normalized_race(title="Race A", track="Tsukuba", race_class="Road Cars"),
+        _normalized_race(title="Race B", track="Spa", race_class="Gr.4"),
+        _normalized_race(title="Race C", track="Suzuka", race_class="Gr.3"),
     ]
 
 
@@ -107,12 +127,12 @@ def get_current_races() -> list[dict[str, str | int | None]]:
             detail_soup = BeautifulSoup(detail_response.text, "html.parser")
 
             track_node = detail_soup.find("h2")
-            track = track_node.get_text(strip=True) if track_node else "Unknown track"
+            track = track_node.get_text(strip=True) if track_node else None
 
             bop_link = detail_soup.select_one('a[href^="/database/bop/"]')
             if bop_link:
                 class_match = re.search(r"(GR\.\d)", bop_link.get_text(" ", strip=True))
-                car_class = class_match.group(1) if class_match else "Unknown class"
+                car_class = class_match.group(1) if class_match else None
             else:
                 car_class = "Road Cars"
 
@@ -139,7 +159,7 @@ def get_current_races() -> list[dict[str, str | int | None]]:
                 candidate = text_lines[date_index - 1]
                 is_tire_compound = re.fullmatch(r"[A-Z]{2,3}", candidate) is not None
                 if (
-                    candidate != track
+                    (track is None or candidate != track)
                     and not is_tire_compound
                     and "daily" not in candidate.lower()
                     and "week" not in candidate.lower()
@@ -155,14 +175,14 @@ def get_current_races() -> list[dict[str, str | int | None]]:
                         tires = " / ".join(tire_tokens)
 
             races.append(
-                {
-                    "title": title,
-                    "track": track,
-                    "class": car_class,
-                    "car": car_name,
-                    "tires": tires,
-                    "laps": laps,
-                }
+                _normalized_race(
+                    title=title,
+                    track=track,
+                    race_class=car_class,
+                    car=car_name,
+                    laps=laps,
+                    tires=tires,
+                )
             )
             seen_titles.add(title)
 
