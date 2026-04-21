@@ -4,7 +4,7 @@ from aiogram.types import FSInputFile, InputMediaPhoto, Message
 
 from scheduler import send_weekly_races
 from services.formatting import format_full_week, format_requirements_lines, get_week_range
-from services.lfm_series_cards import format_lfm_series_weekly
+from services.lfm_series_cards import build_lfm_simulation_messages
 from services.races import get_all_races
 from services.subscribers import add_subscriber
 from services.track_images import find_track_image
@@ -103,9 +103,8 @@ async def current_handler(message: Message) -> None:
 
     lfm_source = next((item for item in results if item.get("source") == "lfm"), None)
     lfm_flat = lfm_source.get("data") if lfm_source and lfm_source.get("data") else []
-    lfm_text = format_lfm_series_weekly(lfm_flat)
-    if lfm_text:
-        await message.answer(lfm_text)
+    for lfm_block in build_lfm_simulation_messages(lfm_flat):
+        await message.answer(lfm_block)
 
 
 @router.message(Command("force_send"))

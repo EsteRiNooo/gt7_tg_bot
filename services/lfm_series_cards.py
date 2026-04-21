@@ -20,6 +20,7 @@ SIM_HASHTAGS: dict[str, str] = {
     "Automobilista 2": "AMS2",
     "Le Mans Ultimate": "LMU",
     "Assetto Corsa Competizione": "ACC",
+    "Assetto Corsa EVO": "ACEVO",
     "iRacing": "IRACING",
     "rFactor 2": "RF2",
     "RaceRoom": "RACEROOM",
@@ -29,19 +30,37 @@ SIM_BLOCK_ORDER: list[str] = [
     "Automobilista 2",
     "Le Mans Ultimate",
     "Assetto Corsa Competizione",
+    "Assetto Corsa EVO",
     "iRacing",
     "rFactor 2",
     "RaceRoom",
 ]
 
 
+def format_duration(minutes: int) -> str:
+    """Human-readable duration from total minutes (days/hours/mins, skip zeros)."""
+    if minutes <= 0:
+        return "0m"
+    days = minutes // 1440
+    hours = (minutes % 1440) // 60
+    mins = minutes % 60
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if mins:
+        parts.append(f"{mins}m")
+    if not parts:
+        return "0m"
+    return "".join(parts)
+
+
 def format_interval(delta_minutes: int) -> str:
-    """Convert minutes to labels like ``1h`` or ``90m`` (empty if invalid)."""
+    """Convert a positive minute delta to short labels (kept for compatibility)."""
     if delta_minutes <= 0:
         return ""
-    if delta_minutes % 60 == 0:
-        return f"{delta_minutes // 60}h"
-    return f"{delta_minutes}m"
+    return format_duration(delta_minutes)
 
 
 def compute_interval(future_starts: list[datetime]) -> int | None:
@@ -112,12 +131,37 @@ def _duration_display(ev: dict[str, Any]) -> str:
     return "0"
 
 
-def _class_display(ev: dict[str, Any]) -> str:
-    for key in ("class", "car_class", "race_class"):
-        v = ev.get(key)
-        if isinstance(v, str) and v.strip():
-            return v.strip()
+def _class_label_from_event(ev: dict[str, Any]) -> str:
+    v = ev.get("class")
+    if isinstance(v, str) and v.strip():
+        return v.strip()
+    raw_cc = ev.get("carClasses")
+    if isinstance(raw_cc, list) and raw_cc:
+        parts: list[str] = []
+        for item in raw_cc:
+            if isinstance(item, str) and item.strip():
+                parts.append(item.strip())
+            elif isinstance(item, dict):
+                name = item.get("class") or item.get("name") or item.get("label")
+                if isinstance(name, str) and name.strip():
+                    parts.append(name.strip())
+        if parts:
+            return " / ".join(dict.fromkeys(parts))
+    cc = ev.get("car_class")
+    if isinstance(cc, str) and cc.strip():
+        return cc.strip()
     return ""
+
+
+def _class_label_for_group(rows: list[dict[str, Any]]) -> str:
+    labels: list[str] = []
+    seen: set[str] = set()
+    for ev in rows:
+        lab = _class_label_from_event(ev)
+        if lab and lab not in seen:
+            seen.add(lab)
+            labels.append(lab)
+    return " / ".join(labels)
 
 
 def _requirements(ev: dict[str, Any]) -> dict[str, str] | None:
@@ -127,20 +171,11 @@ def _requirements(ev: dict[str, Any]) -> dict[str, str] | None:
     return None
 
 
-def _starts_in_label(seconds_until: int) -> str:
-    if seconds_until <= 0:
-        return "0m"
-    minutes = int((seconds_until + 59) // 60)
-    label = format_interval(minutes)
-    return label if label else f"{minutes}m"
-
-
-def _sim_hashtag(sim: str) -> str:
+def _lfm_message_tag(sim: str) -> str:
     tag = SIM_HASHTAGS.get(sim.strip())
-    if tag:
-        return f"#{tag}"
-    compact = "".join(ch for ch in sim.upper() if ch.isalnum())[:8]
-    return f"#{compact or 'LFM'}"
+    if not tag:
+        tag = "".join(ch for ch in sim.upper() if ch.isalnum())[:8] or "LFM"
+    return f"#{tag}_LFM"
 
 
 def _ordered_sims(sims: set[str]) -> list[str]:
@@ -154,17 +189,17 @@ def _ordered_sims(sims: set[str]) -> list[str]:
     return ordered
 
 
-def format_lfm_series_weekly(
+def build_lfm_simulation_messages(
     flat_events: list[dict[str, Any]],
     *,
     reference_utc: datetime | None = None,
-) -> str:
+) -> list[str]:
     """
-    Build human-readable LFM text: one block per simulation, up to 5 series each,
-    sorted by nearest upcoming start. Uses only fields present on flat parser output.
+    One Telegram message text per simulation (AMS2_LFM, LMU_LFM, ...), each with up to
+    5 series cards sorted by next start.
     """
     if not flat_events:
-        return ""
+        return []
 
     tz = _berlin_tz()
     ref = reference_utc or datetime.now(timezone.utc)
@@ -207,16 +242,15 @@ def format_lfm_series_weekly(
             continue
 
         interval_minutes = compute_interval(future_starts)
-        interval_label = format_interval(interval_minutes) if interval_minutes is not None else ""
-
         seconds_until = int((next_start - now).total_seconds())
-        starts_in = _starts_in_label(seconds_until)
+        starts_in = format_duration(int((seconds_until + 59) // 60))
+        interval_label = format_duration(interval_minutes) if interval_minutes is not None else ""
 
         track = ""
         if isinstance(sample.get("track"), str) and sample["track"].strip():
             track = sample["track"].strip()
 
-        race_class = _class_display(sample)
+        race_class = _class_label_for_group(rows)
         duration_str = _duration_display(sample)
         requirements = _requirements(sample)
 
@@ -232,10 +266,7 @@ def format_lfm_series_weekly(
         }
         sim_cards[sim].append(card)
 
-    if not sim_cards:
-        return ""
-
-    lines: list[str] = []
+    messages: list[str] = []
     for sim in _ordered_sims(set(sim_cards.keys())):
         cards = sim_cards.get(sim, [])
         if not cards:
@@ -243,20 +274,21 @@ def format_lfm_series_weekly(
         cards.sort(key=lambda c: c["_sort_key"])
         cards = cards[:5]
 
-        lines.append(_sim_hashtag(sim))
-        lines.append(f"{sim} | {LFM_SOURCE_LINE}")
-        lines.append("")
+        lines: list[str] = [
+            _lfm_message_tag(sim),
+            f"{sim} | {LFM_SOURCE_LINE}",
+            "",
+        ]
 
         for index, card in enumerate(cards):
             title = (card.get("title") or "Series").strip()
             track = (card.get("track") or "Unknown track").strip()
-            race_class = (card.get("class") or "").strip()
+            race_class = (card.get("class") or "").strip() or "Unknown class"
             duration = (card.get("duration") or "0").strip()
 
             lines.append(title)
             lines.append(f"📍 {track}")
-            if race_class:
-                lines.append(f"🏁 {race_class}")
+            lines.append(f"🏁 {race_class}")
             lines.append(f"⏱ {duration} min")
             lines.append(f"⏳ Starts in {card.get('next_start_in') or '0m'}")
             if card.get("interval"):
@@ -272,6 +304,17 @@ def format_lfm_series_weekly(
             if index < len(cards) - 1:
                 lines.extend(["", "──────────", ""])
 
-        lines.extend(["", ""])
+        messages.append("\n".join(lines).rstrip())
 
-    return "\n".join(lines).rstrip()
+    return messages
+
+
+def format_lfm_series_weekly(
+    flat_events: list[dict[str, Any]],
+    *,
+    reference_utc: datetime | None = None,
+) -> str:
+    """Backward-compatible: join all simulation blocks (prefer ``build_lfm_simulation_messages``)."""
+    return "\n\n".join(
+        build_lfm_simulation_messages(flat_events, reference_utc=reference_utc)
+    ).rstrip()

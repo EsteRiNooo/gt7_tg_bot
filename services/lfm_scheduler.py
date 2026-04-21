@@ -101,6 +101,100 @@ def _series_title(series: dict[str, Any]) -> str:
     return ""
 
 
+def _lfm_series_class_label(series: dict[str, Any]) -> str:
+    """Human-readable class/car label from raw LFM series (not parser output)."""
+    settings = series.get("settings") or {}
+    style = (series.get("event_style") or "").strip().lower()
+
+    def _vehicle_class_id() -> str:
+        ses = settings.get("season_event_settings") or {}
+        dss = ses.get("default_server_settings") or {}
+        default = dss.get("default") if isinstance(dss, dict) else None
+        if isinstance(default, dict):
+            vid = default.get("VehicleClassId")
+            if isinstance(vid, str) and vid.strip():
+                return vid.strip()
+        return ""
+
+    def _from_car_classes_list(raw_cc: object) -> str:
+        if not isinstance(raw_cc, list) or not raw_cc:
+            return ""
+        parts: list[str] = []
+        for item in raw_cc:
+            if isinstance(item, str) and item.strip():
+                parts.append(item.strip())
+            elif isinstance(item, dict):
+                name = item.get("class") or item.get("name") or item.get("label")
+                if isinstance(name, str) and name.strip():
+                    parts.append(name.strip())
+        if not parts:
+            return ""
+        return " / ".join(dict.fromkeys(parts))
+
+    def _from_class_license_req() -> str:
+        raw_clr = series.get("class_license_req")
+        if not isinstance(raw_clr, list) or not raw_clr:
+            return ""
+        parts: list[str] = []
+        for item in raw_clr:
+            if isinstance(item, str) and item.strip():
+                parts.append(item.strip())
+            elif isinstance(item, dict):
+                name = item.get("class") or item.get("name")
+                if isinstance(name, str) and name.strip():
+                    parts.append(name.strip())
+        if not parts:
+            return ""
+        return " / ".join(dict.fromkeys(parts))
+
+    def _from_championship() -> str:
+        ch = settings.get("championship_settings") or {}
+        car_classes = ch.get("car_classes")
+        if not isinstance(car_classes, list) or not car_classes:
+            return ""
+        names: list[str] = []
+        for item in car_classes:
+            if isinstance(item, dict):
+                c = item.get("class")
+                if isinstance(c, str) and c.strip():
+                    names.append(c.strip())
+        if not names:
+            return ""
+        return " / ".join(dict.fromkeys(names))
+
+    if style == "daily":
+        v = _vehicle_class_id()
+        if v:
+            return v
+        cc = series.get("car_class")
+        if isinstance(cc, str) and cc.strip():
+            return cc.strip()
+        s = _from_car_classes_list(series.get("carClasses"))
+        if s:
+            return s
+        s = _from_class_license_req()
+        if s:
+            return s
+        return ""
+
+    s = _from_championship()
+    if s:
+        return s
+    s = _from_class_license_req()
+    if s:
+        return s
+    s = _from_car_classes_list(series.get("carClasses"))
+    if s:
+        return s
+    v = _vehicle_class_id()
+    if v:
+        return v
+    car_class = series.get("car_class")
+    if isinstance(car_class, str) and car_class.strip():
+        return car_class.strip()
+    return ""
+
+
 def _weekly_race_times(series: dict[str, Any]) -> list[datetime]:
     times: list[datetime] = []
     seen: set[tuple[int, int, int, int, int, int, int]] = set()
@@ -192,6 +286,7 @@ def flatten_lfm_week_events(
             duration = _as_int(series.get("race_length"))
             if duration is None:
                 duration = 0
+            class_label = _lfm_series_class_label(series)
 
             if style == "daily":
                 settings = series.get("settings")
@@ -217,6 +312,7 @@ def flatten_lfm_week_events(
                                 "sim": sim,
                                 "series": title,
                                 "track": track,
+                                "class": class_label,
                                 "startTime": start.isoformat(),
                                 "duration": duration,
                                 "type": "daily",
@@ -234,6 +330,7 @@ def flatten_lfm_week_events(
                             "sim": sim,
                             "series": title,
                             "track": track,
+                            "class": class_label,
                             "startTime": local_start.isoformat(),
                             "duration": duration,
                             "type": "weekly",
