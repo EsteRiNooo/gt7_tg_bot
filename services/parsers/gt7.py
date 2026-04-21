@@ -39,7 +39,8 @@ def _normalized_race(
     car: str | None = None,
     laps: int | None = None,
     tires: str | None = None,
-) -> dict[str, str | int | None]:
+    requirements: dict | None = None,
+) -> dict[str, str | int | None | dict | None]:
     game = "GT7"
     race_type = "weekly"
     uid = _build_uid(game, title, track)
@@ -56,6 +57,7 @@ def _normalized_race(
         "duration": None,
         "tires": tires,
         "start_time": None,
+        "requirements": requirements,
         "uid": uid,
     }
 

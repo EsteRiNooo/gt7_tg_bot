@@ -1,6 +1,9 @@
 from services.parsers.gt7 import GT7Parser
 from services.parsers.lmu_official import LMUOfficialParser
 
+# Unified normalized race dict (from parsers) includes:
+#   requirements: dict | None  — optional eligibility fields (e.g. safety, license); default None
+
 
 async def get_all_races() -> list[dict]:
     parsers = [

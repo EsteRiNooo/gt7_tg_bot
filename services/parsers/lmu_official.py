@@ -1,5 +1,6 @@
 import re
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
+from typing import Any
 
 import requests
 
@@ -17,6 +18,16 @@ REQUEST_HEADERS = {
     "Referer": "https://www.lmuschedule.com/",
     "Origin": "https://www.lmuschedule.com",
 }
+
+LMU_ALLOWED_RACE_TYPES = frozenset({"Daily Races", "Weekly Races"})
+
+
+def _format_interval_label(delta_minutes: int) -> str:
+    if delta_minutes <= 0:
+        return ""
+    if delta_minutes % 60 == 0:
+        return f"{delta_minutes // 60}h"
+    return f"{delta_minutes}m"
 
 
 def _slugify(value: str | None) -> str:
@@ -47,7 +58,7 @@ def _parse_track(circuit: str | None) -> tuple[str | None, str | None]:
     return value or None, None
 
 
-def _normalize_time(raw_time: str | None) -> datetime | None:
+def _normalize_iso_time(raw_time: str | None) -> datetime | None:
     if not raw_time or not isinstance(raw_time, str):
         return None
 
@@ -68,26 +79,79 @@ def _normalize_time(raw_time: str | None) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _extract_time_candidates(raw_times: object) -> list[datetime]:
+def _parse_hh_mm_local(value: str, now_local: datetime) -> datetime | None:
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", value.strip())
+    if not m:
+        return None
+    hour, minute = int(m.group(1)), int(m.group(2))
+    if hour > 23 or minute > 59:
+        return None
+    tz = now_local.tzinfo
+    base = datetime.combine(now_local.date(), time(hour, minute), tzinfo=tz)
+    if base <= now_local:
+        base = base + timedelta(days=1)
+    return base
+
+
+def _extract_future_local_times(raw_times: object, now_local: datetime) -> list[datetime]:
+    """Parse times (prefer HH:MM local; fallback ISO), return sorted future datetimes in local tz."""
     candidates: list[datetime] = []
     if not isinstance(raw_times, list):
         return candidates
 
     for item in raw_times:
         if isinstance(item, str):
-            parsed = _normalize_time(item)
-            if parsed is not None:
-                candidates.append(parsed)
+            s = item.strip()
+            if not s:
+                continue
+            local_dt = _parse_hh_mm_local(s, now_local)
+            if local_dt is not None:
+                candidates.append(local_dt)
+                continue
+            iso_dt = _normalize_iso_time(s)
+            if iso_dt is not None:
+                candidates.append(iso_dt.astimezone(now_local.tzinfo))
             continue
 
         if isinstance(item, dict):
             for key in ("time", "startTime", "start", "date", "datetime"):
-                parsed = _normalize_time(item.get(key))
-                if parsed is not None:
-                    candidates.append(parsed)
-                    break
+                raw = item.get(key)
+                if isinstance(raw, str):
+                    s = raw.strip()
+                    local_dt = _parse_hh_mm_local(s, now_local)
+                    if local_dt is not None:
+                        candidates.append(local_dt)
+                        break
+                    iso_dt = _normalize_iso_time(s)
+                    if iso_dt is not None:
+                        candidates.append(iso_dt.astimezone(now_local.tzinfo))
+                        break
 
-    return candidates
+    future = sorted(t for t in candidates if t >= now_local)
+    return future
+
+
+def _safety_label_from_rank(raw: object) -> tuple[str | None, str | None]:
+    """Returns (raw_display, label) e.g. ('1.3x', 'SILVER')."""
+    if raw is None:
+        return None, None
+    text = str(raw).strip()
+    if not text:
+        return None, None
+    m = re.match(r"^([\d.]+)\s*x?\s*$", text, flags=re.IGNORECASE)
+    if not m:
+        return text, None
+    try:
+        value = float(m.group(1))
+    except ValueError:
+        return text, None
+    if value < 1.0:
+        label = "BRONZE"
+    elif value < 1.4:
+        label = "SILVER"
+    else:
+        label = "GOLD"
+    return text, label
 
 
 class LMUOfficialParser(BaseParser):
@@ -96,7 +160,7 @@ class LMUOfficialParser(BaseParser):
     async def get_races(self) -> list[dict]:
         return self.get_races_sync()
 
-    def get_races_sync(self) -> list[dict[str, str | int | None]]:
+    def get_races_sync(self) -> list[dict[str, Any]]:
         try:
             response = requests.get(
                 LMU_SCHEDULES_URL,
@@ -123,21 +187,38 @@ class LMUOfficialParser(BaseParser):
             raise ValueError("invalid LMU API payload")
         print(f"LMU API returned {len(data)} races")
 
-        now_utc = datetime.now(timezone.utc)
-        races: list[dict[str, str | int | None]] = []
+        now_local = datetime.now().astimezone()
+        races: list[dict[str, Any]] = []
 
         for race in data:
             if not isinstance(race, dict):
                 continue
-            if race.get("raceType") != "Daily Races":
+            race_type = race.get("raceType")
+            if race_type not in LMU_ALLOWED_RACE_TYPES:
                 continue
 
-            times = _extract_time_candidates(race.get("times"))
-            future_times = sorted(time_value for time_value in times if time_value >= now_utc)
+            future_times = _extract_future_local_times(race.get("times"), now_local)
             if not future_times:
                 continue
 
-            next_time = future_times[0].isoformat()
+            next_start = future_times[0]
+            delta = next_start - now_local
+            seconds = delta.total_seconds()
+            if seconds <= 0:
+                minutes = 0
+            else:
+                minutes = int((seconds + 59) // 60)
+            next_start_in = f"{minutes}m"
+
+            interval: str | None = None
+            if len(future_times) >= 2:
+                gap_seconds = (future_times[1] - future_times[0]).total_seconds()
+                gap_minutes = int(gap_seconds // 60)
+                if gap_minutes > 0:
+                    label = _format_interval_label(gap_minutes)
+                    if label:
+                        interval = label
+
             track, layout = _parse_track(race.get("circuit"))
 
             raw_classes = race.get("carClasses")
@@ -159,11 +240,20 @@ class LMUOfficialParser(BaseParser):
             if duration == "":
                 duration = None
 
+            safety_raw, safety_label = _safety_label_from_rank(race.get("safetyRank"))
+            requirements: dict[str, str] | None = None
+            if safety_label is not None:
+                requirements = {"safety": safety_label}
+                if safety_raw:
+                    requirements["safety_raw"] = safety_raw
+
+            type_norm = "daily" if race_type == "Daily Races" else "weekly"
+
             races.append(
                 {
                     "game": "lmu",
                     "source": "official",
-                    "type": "daily",
+                    "type": type_norm,
                     "title": title,
                     "track": track,
                     "layout": layout,
@@ -172,7 +262,10 @@ class LMUOfficialParser(BaseParser):
                     "duration": duration,
                     "tires": None,
                     "car": None,
-                    "start_time": next_time,
+                    "start_time": next_start.isoformat(),
+                    "next_start_in": next_start_in,
+                    "interval": interval,
+                    "requirements": requirements,
                     "uid": _build_uid("lmu", title, track),
                 }
             )

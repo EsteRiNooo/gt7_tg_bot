@@ -1,7 +1,39 @@
 from datetime import date, timedelta
 from html import escape
+from typing import Any
 
 from services.utils import is_single_car
+
+_REQUIREMENT_EMOJI: dict[str, str] = {
+    "license": "🎫",
+    "safety": "🛡",
+}
+
+
+def format_requirements_lines(race: dict[str, Any], *, html: bool = True) -> list[str]:
+    """One line per requirement key; empty dict / None -> no lines."""
+    requirements = race.get("requirements")
+    if not isinstance(requirements, dict) or not requirements:
+        return []
+
+    lines: list[str] = []
+    for key in sorted(requirements.keys()):
+        if str(key).endswith("_raw"):
+            continue
+        raw_value = requirements.get(key)
+        if raw_value is None:
+            continue
+        text = str(raw_value).strip()
+        if not text:
+            continue
+        display = escape(text) if html else text
+        emoji = _REQUIREMENT_EMOJI.get(key)
+        if emoji:
+            lines.append(f"{emoji} {display}")
+        else:
+            key_display = escape(str(key)) if html else str(key)
+            lines.append(f"{key_display}: {display}")
+    return lines
 
 
 def get_week_range() -> str:
@@ -31,6 +63,8 @@ def format_full_week(races: list[dict[str, str | int | None]]) -> str:
                 f"🏎 {race_class}",
             ]
         )
+
+        lines.extend(format_requirements_lines(race, html=True))
 
         laps_value = race.get("laps")
         if laps_value is not None:

@@ -1,11 +1,9 @@
-from datetime import datetime
-
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import FSInputFile, InputMediaPhoto, Message
 
 from scheduler import send_weekly_races
-from services.formatting import format_full_week, get_week_range
+from services.formatting import format_full_week, format_requirements_lines, get_week_range
 from services.races import get_all_races
 from services.subscribers import add_subscriber
 from services.track_images import find_track_image
@@ -31,37 +29,29 @@ def _format_gt7_message(races: list[dict[str, str | None]]) -> str:
     return "\n".join(gt7_header + details).rstrip()
 
 
-def _format_lmu_time(value: str | None) -> str:
-    if not value:
-        return "Unknown"
-    normalized = value.replace("Z", "+00:00")
-    try:
-        parsed = datetime.fromisoformat(normalized)
-        local_time = parsed.astimezone()
-        return local_time.strftime("%H:%M")
-    except ValueError:
-        return value
-
-
 def _format_lmu_message(races: list[dict[str, str | None]]) -> str:
-    lines = ["#LMU", "🏁 Le Mans Ultimate", "📅 Daily Races", ""]
+    lines = ["#LMU", "🏁 Le Mans Ultimate", "📅 Daily & Weekly", ""]
 
     for index, race in enumerate(races[:5]):
         title = (race.get("title") or "Daily Race").strip()
         track = (race.get("track") or "Unknown track").strip()
         race_class = (race.get("class") or "Unknown class").strip()
         duration = (race.get("duration") or "Unknown").strip()
-        start_time = _format_lmu_time(race.get("start_time"))
+        next_in = race.get("next_start_in")
+        interval = race.get("interval")
 
-        lines.extend(
-            [
-                f"🏁 {title}",
-                f"📍 {track}",
-                f"🏎 {race_class}",
-                f"⏱ {duration} min",
-                f"🕒 Next: {start_time}",
-            ]
-        )
+        block = [
+            f"🏁 {title}",
+            f"📍 {track}",
+            f"🏎 {race_class}",
+            f"⏱ {duration} min",
+        ]
+        if next_in:
+            block.append(f"Starts in: {next_in}")
+        if interval:
+            block.append(f"Every: {interval}")
+        lines.extend(block)
+        lines.extend(format_requirements_lines(race, html=False))
         if index < len(races[:5]) - 1:
             lines.extend(["", "──────────", ""])
 
