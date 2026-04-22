@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from typing import Any
 
@@ -195,6 +196,166 @@ def _lfm_series_class_label(series: dict[str, Any]) -> str:
     return ""
 
 
+def normalize_class(raw: str) -> str:
+    text = raw.strip()
+    if not text:
+        return ""
+    low = text.lower()
+    if "gt3" in low:
+        return "GT3"
+    if "gt4" in low:
+        return "GT4"
+    if "lmp2" in low:
+        return "LMP2"
+    if "lmp3" in low:
+        return "LMP3"
+    if "lmdh" in low or "lmh" in low or "hyper" in low or low.startswith("hy "):
+        return "Hypercar"
+    return text.upper()
+
+
+def parse_class_from_series_name(series_name: str) -> str | None:
+    name = (series_name or "").strip().lower()
+    if not name:
+        return None
+    if "gt3" in name:
+        return "GT3"
+    if "gt4" in name:
+        return "GT4"
+    if "mx-5" in name or "mazda" in name:
+        return "Mazda MX-5"
+    if "porsche cup" in name or " cup" in name or name.endswith("cup"):
+        return "Porsche Cup"
+    if "lmp2" in name:
+        return "LMP2"
+    if "lmp3" in name:
+        return "LMP3"
+    if "hypercar" in name or "lmdh" in name or "lmh" in name:
+        return "Hypercar"
+    return None
+
+
+def _extract_car_ids(event: dict[str, Any]) -> list[str]:
+    for key in ("car_ids", "carIds", "carids"):
+        raw = event.get(key)
+        if isinstance(raw, list):
+            return [str(item).strip() for item in raw if str(item).strip()]
+        if isinstance(raw, (str, int)):
+            one = str(raw).strip()
+            return [one] if one else []
+    return []
+
+
+def _extract_car_lookup_key(car: dict[str, Any]) -> str:
+    for key in ("server_value", "serverValue", "id", "car_id", "carId", "value"):
+        v = car.get(key)
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s:
+            return s
+    return ""
+
+
+def _extract_car_name(car: dict[str, Any]) -> str:
+    for key in ("car_name", "name", "model", "label"):
+        v = car.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
+def _extract_car_class(car: dict[str, Any]) -> str:
+    for key in ("class", "car_class", "class_name"):
+        v = car.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
+def _collect_car_rows(raw: Any) -> list[dict[str, Any]]:
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, dict)]
+    if isinstance(raw, dict):
+        out: list[dict[str, Any]] = []
+        for v in raw.values():
+            if isinstance(v, dict):
+                out.append(v)
+            elif isinstance(v, list):
+                out.extend([item for item in v if isinstance(item, dict)])
+        return out
+    return []
+
+
+def build_cars_map(payload: dict[str, Any]) -> dict[str, dict[str, str]]:
+    cars_map: dict[str, dict[str, str]] = {}
+    for car in _collect_car_rows(payload.get("cars")):
+        k = _extract_car_lookup_key(car)
+        if not k:
+            continue
+        cars_map[k] = {
+            "name": _extract_car_name(car),
+            "class": _extract_car_class(car),
+        }
+
+    series_root = payload.get("series")
+    if not isinstance(series_root, dict):
+        return cars_map
+    for sim_block in series_root.values():
+        if not isinstance(sim_block, dict):
+            continue
+        for car in _collect_car_rows(sim_block.get("cars")):
+            k = _extract_car_lookup_key(car)
+            if not k:
+                continue
+            cars_map[k] = {
+                "name": _extract_car_name(car),
+                "class": _extract_car_class(car),
+            }
+    return cars_map
+
+
+def parse_class_from_cars(event: dict[str, Any], cars_map: dict[str, dict[str, str]]) -> str | None:
+    car_ids = _extract_car_ids(event)
+    if not car_ids:
+        return None
+
+    if len(car_ids) == 1:
+        one = cars_map.get(car_ids[0], {})
+        car_name = one.get("name") if isinstance(one, dict) else ""
+        if isinstance(car_name, str) and car_name.strip():
+            return f"Fixed: {car_name.strip()}"
+
+    classes: set[str] = set()
+    for car_id in car_ids:
+        car = cars_map.get(car_id)
+        if not isinstance(car, dict):
+            continue
+        raw_class = car.get("class")
+        if not isinstance(raw_class, str) or not raw_class.strip():
+            continue
+        norm = normalize_class(raw_class)
+        if norm:
+            classes.add(norm)
+    if not classes:
+        return None
+    if len(classes) == 1:
+        return next(iter(classes))
+    return "Multiclass"
+
+
+def resolve_event_class(event: dict[str, Any], cars_map: dict[str, dict[str, str]]) -> str:
+    series_name = event.get("series_name")
+    if not isinstance(series_name, str):
+        series_name = _series_title(event)
+    return (
+        parse_class_from_series_name(series_name)
+        or parse_class_from_cars(event, cars_map)
+        or _lfm_series_class_label(event)
+        or "Unknown"
+    )
+
+
 def _weekly_race_times(series: dict[str, Any]) -> list[datetime]:
     times: list[datetime] = []
     seen: set[tuple[int, int, int, int, int, int, int]] = set()
@@ -221,6 +382,113 @@ def _weekly_race_times(series: dict[str, Any]) -> list[datetime]:
     return times
 
 
+_LFM_SIM_ORDER = [
+    "Automobilista 2",
+    "Le Mans Ultimate",
+    "Assetto Corsa Competizione",
+    "Assetto Corsa EVO",
+    "iRacing",
+    "rFactor 2",
+    "RaceRoom",
+]
+
+
+def _lfm_requirements_from_series(series: dict[str, Any]) -> dict[str, str] | None:
+    out: dict[str, str] = {}
+    lic = series.get("min_license")
+    if isinstance(lic, str) and lic.strip():
+        out["license"] = lic.strip()
+    sr = series.get("min_sr")
+    if sr is not None and str(sr).strip():
+        out["safety"] = str(sr).strip()
+    return out if out else None
+
+
+def _lfm_drivers_from_series(series: dict[str, Any]) -> int | None:
+    for key in ("signups", "drivers", "registered_drivers"):
+        v = _as_int(series.get(key))
+        if v is not None:
+            return v
+    return None
+
+
+def _ordered_sims_lfm(sims: set[str]) -> list[str]:
+    remaining = set(sims)
+    out: list[str] = []
+    for name in _LFM_SIM_ORDER:
+        if name in remaining:
+            out.append(name)
+            remaining.discard(name)
+    out.extend(sorted(remaining))
+    return out
+
+
+def _enrich_lfm_events(
+    events: list[dict[str, Any]],
+    ref_local: datetime,
+    tz: tzinfo,
+) -> list[dict[str, Any]]:
+    if not events:
+        return events
+
+    by_key: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        sim = ev.get("sim")
+        ser = ev.get("series")
+        if isinstance(sim, str) and isinstance(ser, str):
+            by_key[(sim.strip(), ser.strip())].append(ev)
+
+    min_utc = datetime.min.replace(tzinfo=timezone.utc)
+    for evs in by_key.values():
+        evs.sort(
+            key=lambda e: _parse_lfm_datetime(e.get("startTime")) or min_utc,
+        )
+        for i, ev in enumerate(evs):
+            st = _parse_lfm_datetime(ev.get("startTime"))
+            if st is None:
+                continue
+            st_local = st.astimezone(tz)
+            sec = (st_local - ref_local).total_seconds()
+            ev["starts_in_minutes"] = int((sec + 59) // 60) if sec > 0 else 0
+            if i + 1 < len(evs):
+                st2 = _parse_lfm_datetime(evs[i + 1].get("startTime"))
+                if st2 is not None:
+                    gap = (st2 - st).total_seconds()
+                    if gap > 0:
+                        ev["every_minutes"] = int(gap // 60)
+            elif ev.get("type") != "daily":
+                ev.pop("every_minutes", None)
+
+    sims_before = {
+        str(ev.get("sim")).strip()
+        for ev in events
+        if isinstance(ev, dict)
+        and isinstance(ev.get("sim"), str)
+        and str(ev.get("sim")).strip()
+    }
+    logger.info(f"[LFM] sims before grouping: {sims_before}")
+    logger.info(f"[LFM] total races before grouping: {len(events)}")
+
+    by_sim: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for ev in events:
+        if isinstance(ev, dict) and isinstance(ev.get("sim"), str):
+            by_sim[ev["sim"].strip()].append(ev)
+
+    logger.info(f"[LFM] sims after grouping: {list(by_sim.keys())}")
+    logger.info("[LFM] races per sim:")
+    for sim, items in by_sim.items():
+        logger.info(f"{sim}: {len(items)}")
+
+    out: list[dict[str, Any]] = []
+    for sim in _ordered_sims_lfm(set(by_sim.keys())):
+        bucket = by_sim.get(sim, [])
+        out.extend(bucket)
+
+    return out
+
+
 def flatten_lfm_week_events(
     payload: dict[str, Any],
     *,
@@ -244,6 +512,7 @@ def flatten_lfm_week_events(
     ref_local = ref.astimezone(tz)
     week_start, week_end = _week_bounds_berlin(ref_local.date(), tz)
     week_dates = _dates_in_week(week_start.date())
+    cars_map = build_cars_map(payload)
 
     events: list[dict[str, Any]] = []
 
@@ -286,7 +555,9 @@ def flatten_lfm_week_events(
             duration = _as_int(series.get("race_length"))
             if duration is None:
                 duration = 0
-            class_label = _lfm_series_class_label(series)
+            class_label = resolve_event_class(series, cars_map)
+            reqs = _lfm_requirements_from_series(series)
+            drv = _lfm_drivers_from_series(series)
 
             if style == "daily":
                 settings = series.get("settings")
@@ -307,37 +578,45 @@ def flatten_lfm_week_events(
                         generated_before += 1
                         if not (week_start <= start < week_end):
                             continue
-                        events.append(
-                            {
-                                "sim": sim,
-                                "series": title,
-                                "track": track,
-                                "class": class_label,
-                                "startTime": start.isoformat(),
-                                "duration": duration,
-                                "type": "daily",
-                            }
-                        )
+                        row: dict[str, Any] = {
+                            "sim": sim,
+                            "series": title,
+                            "track": track,
+                            "class": class_label,
+                            "startTime": start.isoformat(),
+                            "duration": duration,
+                            "type": "daily",
+                            "every_minutes": int(every),
+                        }
+                        if drv is not None:
+                            row["drivers"] = drv
+                        if reqs:
+                            row["requirements"] = reqs
+                        events.append(row)
 
             else:  # weekly
                 for start in _weekly_race_times(series):
                     generated_before += 1
                     local_start = start.astimezone(tz)
-                    if not (week_start <= local_start < week_end):
-                        continue
-                    events.append(
-                        {
-                            "sim": sim,
-                            "series": title,
-                            "track": track,
-                            "class": class_label,
-                            "startTime": local_start.isoformat(),
-                            "duration": duration,
-                            "type": "weekly",
-                        }
-                    )
+                    row_w: dict[str, Any] = {
+                        "sim": sim,
+                        "series": title,
+                        "track": track,
+                        "class": class_label,
+                        "startTime": local_start.isoformat(),
+                        "duration": duration,
+                        "type": "weekly",
+                        "next_in_week": week_start <= local_start < week_end,
+                    }
+                    if not row_w["next_in_week"]:
+                        row_w["score_penalty"] = 30
+                    if drv is not None:
+                        row_w["drivers"] = drv
+                    if reqs:
+                        row_w["requirements"] = reqs
+                    events.append(row_w)
 
-    events.sort(key=lambda e: (e.get("startTime") or "", e.get("sim") or "", e.get("series") or ""))
+    events = _enrich_lfm_events(events, ref_local, tz)
     logger.info(f"[LFM] sims: {sims_count}")
     logger.info(f"[LFM] total series: {series_total}")
     logger.info(f"[LFM] generated races before week filter: {generated_before}")

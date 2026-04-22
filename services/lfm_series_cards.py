@@ -7,6 +7,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
 from services.formatting import format_requirements_lines
+from services.races_logging import logger
 
 try:
     from zoneinfo import ZoneInfo
@@ -196,7 +197,7 @@ def build_lfm_simulation_messages(
 ) -> list[str]:
     """
     One Telegram message text per simulation (AMS2_LFM, LMU_LFM, ...), each with up to
-    5 series cards sorted by next start.
+    one card per series, sorted by next start.
     """
     if not flat_events:
         return []
@@ -211,6 +212,13 @@ def build_lfm_simulation_messages(
 
     groups = group_races_by_series(flat_events)
     sim_cards: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    all_input_sims = {
+        str(ev.get("sim")).strip()
+        for ev in flat_events
+        if isinstance(ev, dict)
+        and isinstance(ev.get("sim"), str)
+        and str(ev.get("sim")).strip()
+    }
 
     for (sim, series_name), rows in groups.items():
         parsed: list[tuple[datetime, dict[str, Any]]] = []
@@ -223,24 +231,42 @@ def build_lfm_simulation_messages(
             continue
 
         parsed.sort(key=lambda x: x[0])
-        starts_only = [t for t, _ in parsed]
+
+        print("[LFM] sims before filter:", set(ev.get("sim") for _, ev in parsed))
+
+        def race_is_valid(item: tuple[datetime, dict[str, Any]]) -> bool:
+            st, ev = item
+            race_type = str(ev.get("type") or "").strip().lower()
+            if race_type not in ("daily", "weekly"):
+                return False
+            # allow races that already started very recently (LIVE grace window)
+            if st < now - timedelta(minutes=10):
+                return False
+            return st <= horizon_end
+
+        filtered_parsed = [item for item in parsed if race_is_valid(item)]
+        if not filtered_parsed:
+            filtered_parsed = parsed
+
+        print("[LFM] sims after filter:", set(ev.get("sim") for _, ev in filtered_parsed))
+        print(
+            "[LFM] race counts per sim:",
+            {
+                sim_name: len(
+                    [1 for _, ev in filtered_parsed if ev.get("sim") == sim_name],
+                )
+                for sim_name in set(ev.get("sim") for _, ev in filtered_parsed)
+            },
+        )
+
+        starts_only = [t for t, _ in filtered_parsed]
         future_starts = [t for t in starts_only if t >= now]
-        if not future_starts:
-            continue
+        if future_starts:
+            next_start = future_starts[0]
+        else:
+            next_start = starts_only[0]
 
-        next_start = future_starts[0]
-        if next_start > horizon_end:
-            continue
-
-        sample = parsed[0][1]
-        race_type = (sample.get("type") or "").strip().lower()
-        if race_type == "weekly":
-            local_next = next_start.astimezone(tz)
-            if not (week_start <= local_next < week_end):
-                continue
-        elif race_type != "daily":
-            continue
-
+        sample = filtered_parsed[0][1]
         interval_minutes = compute_interval(future_starts)
         seconds_until = int((next_start - now).total_seconds())
         starts_in = format_duration(int((seconds_until + 59) // 60))
@@ -267,12 +293,13 @@ def build_lfm_simulation_messages(
         sim_cards[sim].append(card)
 
     messages: list[str] = []
-    for sim in _ordered_sims(set(sim_cards.keys())):
+    for sim in _ordered_sims(all_input_sims):
         cards = sim_cards.get(sim, [])
         if not cards:
+            print(f"[LFM WARNING] sim {sim} has 0 races after filtering")
+            logger.warning(f"[LFM] sim {sim} has 0 races after filtering")
             continue
         cards.sort(key=lambda c: c["_sort_key"])
-        cards = cards[:5]
 
         lines: list[str] = [
             _lfm_message_tag(sim),
@@ -305,6 +332,9 @@ def build_lfm_simulation_messages(
                 lines.extend(["", "──────────", ""])
 
         messages.append("\n".join(lines).rstrip())
+
+    logger.info(f"[LFM] final sims to send: {list(sim_cards.keys())}")
+    logger.info(f"[LFM] total messages: {len(messages)}")
 
     return messages
 

@@ -36,6 +36,14 @@ def format_requirements_lines(race: dict[str, Any], *, html: bool = True) -> lis
     return lines
 
 
+def format_lfm_score_line(score: Any) -> str | None:
+    if not isinstance(score, int):
+        return None
+    if score >= 50:
+        return f"\U0001f525 Score: {score}"
+    return None
+
+
 def get_week_range() -> str:
     today = date.today()
     monday = today - timedelta(days=today.weekday())
