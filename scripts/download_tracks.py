@@ -5,6 +5,8 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
+from utils.file_guard import safe_write
+
 TRACK_LIST_URL = "https://gran-turismo.fandom.com/wiki/Gran_Turismo_7/Track_List"
 ASSETS_DIR = Path("assets/tracks")
 MAPPING_FILE = Path("assets/tracks_mapping.py")
@@ -93,7 +95,8 @@ def save_mapping(mapping: dict[str, str]) -> None:
         lines.append(f'    "{track_name}": "{path}",')
     lines.append("}")
     lines.append("")
-    MAPPING_FILE.write_text("\n".join(lines), encoding="utf-8")
+    payload = "\n".join(lines).encode("utf-8")
+    safe_write(str(MAPPING_FILE), payload)
 
 
 def main() -> None:

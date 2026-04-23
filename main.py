@@ -1,12 +1,22 @@
 import asyncio
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 
 from services.races_logging import ensure_races_logging_configured
+from utils.file_guard import validate_python_files
 
-from bot.handlers import router
 from config import BOT_TOKEN
 from scheduler import create_scheduler
+
+
+def validate_project() -> None:
+    validate_python_files(str(Path(__file__).resolve().parent))
+
+
+validate_project()
+
+from bot.handlers import router
 
 
 async def main() -> None:

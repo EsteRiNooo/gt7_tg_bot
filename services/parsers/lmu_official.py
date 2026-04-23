@@ -6,6 +6,7 @@ import requests
 
 from services.parsers.base import BaseParser
 from services.races_logging import ensure_races_logging_configured, logger
+from services.time_utils import get_starts_in_minutes
 
 LMU_SCHEDULES_URL = "https://api.lmuschedule.com/racingschedules"
 REQUEST_TIMEOUT_SECONDS = 10
@@ -214,12 +215,8 @@ class LMUOfficialParser(BaseParser):
                 continue
 
             next_start = future_times[0]
-            delta = next_start - now_local
-            seconds = delta.total_seconds()
-            if seconds <= 0:
-                minutes = 0
-            else:
-                minutes = int((seconds + 59) // 60)
+            starts_in = get_starts_in_minutes(now_local, next_start)
+            minutes = starts_in if starts_in <= 0 else starts_in + 1
             next_start_in = f"{minutes}m"
 
             interval: str | None = None

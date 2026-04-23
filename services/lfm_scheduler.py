@@ -7,6 +7,7 @@ from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from typing import Any
 
 from services.races_logging import ensure_races_logging_configured, logger
+from services.time_utils import get_starts_in_minutes
 
 try:
     from zoneinfo import ZoneInfo
@@ -214,25 +215,42 @@ def normalize_class(raw: str) -> str:
     return text.upper()
 
 
-def parse_class_from_series_name(series_name: str) -> str | None:
-    name = (series_name or "").strip().lower()
-    if not name:
-        return None
-    if "gt3" in name:
+def extract_class(event: dict[str, Any]) -> str:
+    series = str(event.get("series") or event.get("series_name") or "").lower()
+    if not series:
+        return "Unknown"
+
+    has_gt3 = "gt3" in series
+    has_gt4 = "gt4" in series
+    if has_gt3 and has_gt4:
+        return "Multiclass"
+
+    if "lmp2" in series and "lmp3" in series:
+        return "Multiclass"
+
+    if "hyper" in series and ("gt3" in series or "lmp2" in series):
+        return "Multiclass"
+
+    if "mazda" in series:
+        return "FIXED: Mazda MX-5"
+    if "porsche cup" in series:
+        return "FIXED: Porsche Cup"
+    if "ferrari" in series:
+        return "FIXED: Ferrari 296"
+    if "lamborghini super trofeo" in series:
+        return "FIXED: Lamborghini ST"
+
+    if "gt3" in series:
         return "GT3"
-    if "gt4" in name:
+    if "gt4" in series:
         return "GT4"
-    if "mx-5" in name or "mazda" in name:
-        return "Mazda MX-5"
-    if "porsche cup" in name or " cup" in name or name.endswith("cup"):
-        return "Porsche Cup"
-    if "lmp2" in name:
+    if "lmp2" in series:
         return "LMP2"
-    if "lmp3" in name:
+    if "lmp3" in series:
         return "LMP3"
-    if "hypercar" in name or "lmdh" in name or "lmh" in name:
-        return "Hypercar"
-    return None
+    if "hyper" in series or "lmdh" in series or "lmh" in series:
+        return "Hyper"
+    return "Unknown"
 
 
 def _extract_car_ids(event: dict[str, Any]) -> list[str]:
@@ -324,7 +342,7 @@ def parse_class_from_cars(event: dict[str, Any], cars_map: dict[str, dict[str, s
         one = cars_map.get(car_ids[0], {})
         car_name = one.get("name") if isinstance(one, dict) else ""
         if isinstance(car_name, str) and car_name.strip():
-            return f"Fixed: {car_name.strip()}"
+            return f"FIXED: {car_name.strip()}"
 
     classes: set[str] = set()
     for car_id in car_ids:
@@ -345,12 +363,16 @@ def parse_class_from_cars(event: dict[str, Any], cars_map: dict[str, dict[str, s
 
 
 def resolve_event_class(event: dict[str, Any], cars_map: dict[str, dict[str, str]]) -> str:
-    series_name = event.get("series_name")
+    series_name = event.get("series")
+    if not isinstance(series_name, str):
+        series_name = event.get("series_name")
     if not isinstance(series_name, str):
         series_name = _series_title(event)
+    extracted = extract_class({"series": series_name})
+    if extracted != "Unknown":
+        return extracted
     return (
-        parse_class_from_series_name(series_name)
-        or parse_class_from_cars(event, cars_map)
+        parse_class_from_cars(event, cars_map)
         or _lfm_series_class_label(event)
         or "Unknown"
     )
@@ -450,8 +472,8 @@ def _enrich_lfm_events(
             if st is None:
                 continue
             st_local = st.astimezone(tz)
-            sec = (st_local - ref_local).total_seconds()
-            ev["starts_in_minutes"] = int((sec + 59) // 60) if sec > 0 else 0
+            starts_in = get_starts_in_minutes(ref_local, st_local)
+            ev["starts_in_minutes"] = starts_in if starts_in <= 0 else starts_in + 1
             if i + 1 < len(evs):
                 st2 = _parse_lfm_datetime(evs[i + 1].get("startTime"))
                 if st2 is not None:
@@ -555,7 +577,12 @@ def flatten_lfm_week_events(
             duration = _as_int(series.get("race_length"))
             if duration is None:
                 duration = 0
-            class_label = resolve_event_class(series, cars_map)
+            cls = resolve_event_class(series, cars_map)
+            car_label: str | None = None
+            class_label = cls
+            if cls.startswith("FIXED:"):
+                class_label = "Fixed"
+                car_label = cls.replace("FIXED:", "", 1).strip()
             reqs = _lfm_requirements_from_series(series)
             drv = _lfm_drivers_from_series(series)
 
@@ -576,10 +603,9 @@ def flatten_lfm_week_events(
                 for d in week_dates:
                     for start in _iter_daily_starts(d, earliest, latest, every, tz):
                         generated_before += 1
-                        if not (week_start <= start < week_end):
-                            continue
                         row: dict[str, Any] = {
                             "sim": sim,
+                            "source": "lfm",
                             "series": title,
                             "track": track,
                             "class": class_label,
@@ -588,6 +614,8 @@ def flatten_lfm_week_events(
                             "type": "daily",
                             "every_minutes": int(every),
                         }
+                        if car_label:
+                            row["car"] = car_label
                         if drv is not None:
                             row["drivers"] = drv
                         if reqs:
@@ -600,16 +628,16 @@ def flatten_lfm_week_events(
                     local_start = start.astimezone(tz)
                     row_w: dict[str, Any] = {
                         "sim": sim,
+                        "source": "lfm",
                         "series": title,
                         "track": track,
                         "class": class_label,
                         "startTime": local_start.isoformat(),
                         "duration": duration,
                         "type": "weekly",
-                        "next_in_week": week_start <= local_start < week_end,
                     }
-                    if not row_w["next_in_week"]:
-                        row_w["score_penalty"] = 30
+                    if car_label:
+                        row_w["car"] = car_label
                     if drv is not None:
                         row_w["drivers"] = drv
                     if reqs:
