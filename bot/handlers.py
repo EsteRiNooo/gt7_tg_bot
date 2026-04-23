@@ -1,7 +1,13 @@
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import FSInputFile, InputMediaPhoto, Message
+from aiogram.types import CallbackQuery, FSInputFile, InputMediaPhoto, Message
 
+from bot.keyboards import (
+    CALLBACK_MENU_ABOUT,
+    CALLBACK_MENU_RACES,
+    CALLBACK_MENU_SETTINGS,
+    main_menu_keyboard,
+)
 from scheduler import send_weekly_races
 from services.formatting import get_week_range
 from services.lfm_series_cards import build_lfm_simulation_messages
@@ -272,14 +278,16 @@ async def start_handler(message: Message) -> None:
     if message.from_user:
         add_subscriber(message.from_user.id)
 
-    await message.answer(
-        "Hi! I am your GT7 weekly races bot.\n"
-        "Use /current to see this week's races."
+    text = (
+        "Привет! Я бот с расписанием гонок.\n\n"
+        "Показываю актуальные гонки текущей недели в "
+        "<b>GT7</b>, <b>LMU</b> и <b>LFM</b>.\n\n"
+        "Выбери действие в меню ниже или используй команду /current."
     )
+    await message.answer(text, reply_markup=main_menu_keyboard(), parse_mode="HTML")
 
 
-@router.message(Command("current"))
-async def current_handler(message: Message) -> None:
+async def _send_current_races_week(message: Message) -> None:
     results = await get_all_races()
     gt7_source = next((item for item in results if item.get("source") == "gt7"), None)
     lmu_source = next((item for item in results if item.get("source") == "lmu_official"), None)
@@ -315,6 +323,47 @@ async def current_handler(message: Message) -> None:
     lfm_flat = lfm_source.get("data") if lfm_source and lfm_source.get("data") else []
     for lfm_block in build_lfm_simulation_messages(lfm_flat):
         await message.answer(lfm_block)
+
+
+@router.message(Command("current"))
+async def current_handler(message: Message) -> None:
+    await _send_current_races_week(message)
+
+
+@router.callback_query(F.data == CALLBACK_MENU_RACES)
+async def menu_races_callback(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if callback.message:
+        await _send_current_races_week(callback.message)
+
+
+@router.callback_query(F.data == CALLBACK_MENU_SETTINGS)
+async def menu_settings_callback(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if not callback.message:
+        return
+    await callback.message.answer(
+        "⚙️ <b>Настройки</b>\n\n"
+        "Здесь пока ничего не настраивается. "
+        "Подписка на еженедельную рассылку включается автоматически при /start.",
+        reply_markup=main_menu_keyboard(),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data == CALLBACK_MENU_ABOUT)
+async def menu_about_callback(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if not callback.message:
+        return
+    await callback.message.answer(
+        "ℹ️ <b>О боте</b>\n\n"
+        "Показываю актуальные гонки недели в Gran Turismo 7 (GT7), "
+        "Le Mans Ultimate (LMU) и Low Fuel Motorsport (LFM).\n\n"
+        "Команда /current — то же самое, что кнопка «Показать гонки».",
+        reply_markup=main_menu_keyboard(),
+        parse_mode="HTML",
+    )
 
 
 @router.message(Command("force_send"))
