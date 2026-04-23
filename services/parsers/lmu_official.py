@@ -311,6 +311,12 @@ class LMUOfficialParser(BaseParser):
 
             tier, tier_field = _extract_tier_from_event(race)
             sr_multiplier = _sr_multiplier_display(race)
+            safety_rank_value = race.get("safetyRank")
+            safety_rank: str | None = None
+            if safety_rank_value is not None:
+                s_rank = str(safety_rank_value).strip()
+                if s_rank:
+                    safety_rank = s_rank
             if tier is None:
                 tier = "Unknown"
                 print("[LMU WARNING] No tier found in event", race)
@@ -343,6 +349,7 @@ class LMUOfficialParser(BaseParser):
                 "tier": tier,
                 "tier_field": tier_field,
                 "sr_multiplier": sr_multiplier,
+                "safety_rank": safety_rank,
                 "requirements": requirements,
                 "uid": _build_uid("lmu", title, track),
             }

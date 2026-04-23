@@ -85,54 +85,64 @@ def _access_line(requirements: dict | None) -> str | None:
     return f"{icon} SR {safety_text}"
 
 
+def map_lmu_sr(sr: str) -> str | None:
+    """LMU-only: tier label from Safety Rank multiplier (safetyRank)."""
+    if not sr:
+        return None
+    s = sr.strip()
+    if s.startswith("1.0"):
+        return "Bronze"
+    if s.startswith("1.3"):
+        return "Silver"
+    if s.startswith("1.5") or s.startswith("2.0"):
+        return "Gold"
+    return None
+
+
+def _lmu_safety_rank_for_display(race: dict[str, object]) -> str | None:
+    """Use API safetyRank only (not safetyRating/sr fallbacks)."""
+    for key in ("safety_rank", "safetyRank"):
+        raw = race.get(key)
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if text:
+            return text
+    return None
+
+
+def get_sr_emoji(tier: str) -> str:
+    """LMU Safety Rank line: emoji by tier label (SR-mapped Bronze/Silver/Gold)."""
+    if tier == "Bronze":
+        return "🟢"
+    if tier == "Silver":
+        return "🟡"
+    if tier == "Gold":
+        return "🟠"
+    return "⚪"
+
+
 def _format_lmu_tier(tier: str, sr: str | None = None) -> str:
     clean_tier = tier.strip()
-    low = clean_tier.lower()
     display_tier = clean_tier.title()
     sr_text = (sr or "").strip()
     if sr_text and not sr_text.lower().startswith("sr"):
         sr_text = f"SR {sr_text}"
     suffix = f" ({sr_text})" if sr_text else ""
 
-    if low in {"beginner"}:
-        return f"🟡 {display_tier}{suffix}"
-    if low in {"rookie"}:
-        return f"🟢 {display_tier}{suffix}"
-    if low in {"bronze"}:
-        return f"🟠 {display_tier}{suffix}"
-    if low in {"silver", "intermediate"}:
-        return f"⚪ {display_tier}{suffix}"
-    if low in {"gold", "advanced"}:
-        return f"🥇 {display_tier}{suffix}"
-    return f"⚪ {display_tier}{suffix}"
+    emoji = get_sr_emoji(display_tier)
+    return f"{emoji} {display_tier}{suffix}"
 
 
 def _extract_lmu_tier_line(race: dict[str, object]) -> str | None:
-    explicit_tier = race.get("tier")
-    tier = str(explicit_tier).strip() if explicit_tier is not None else ""
-    if not tier or tier.lower() == "unknown":
+    sr = _lmu_safety_rank_for_display(race)
+    if not sr:
         return None
 
-    requirements = race.get("requirements")
-    req = requirements if isinstance(requirements, dict) else {}
-
-    explicit_sr = race.get("sr_multiplier")
-    sr = str(explicit_sr).strip() if explicit_sr is not None else ""
-    if not sr:
-        sr = next(
-            (
-                str(race.get(key)).strip()
-                for key in ("sr", "safetyRating")
-                if race.get(key) is not None and str(race.get(key)).strip()
-            ),
-            "",
-        )
-    if not sr:
-        req_safety_raw = req.get("safety_raw")
-        if req_safety_raw is not None and str(req_safety_raw).strip():
-            sr = str(req_safety_raw).strip()
-
-    return _format_lmu_tier(tier, sr or None)
+    tier = map_lmu_sr(sr)
+    if tier:
+        return _format_lmu_tier(tier, sr)
+    return f"SR {sr}"
 
 
 def _group_and_sort_cards(cards: list[dict[str, object]]) -> list[dict[str, object]]:
