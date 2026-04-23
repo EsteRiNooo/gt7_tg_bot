@@ -6,10 +6,19 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
-from services.aggregation.series_builder import build_series_from_races, filter_series
+from services.aggregation.series_builder import build_aggregated_series, filter_series
 from services.races_logging import logger
 
 LFM_SOURCE_LINE = "lowfuelmotorsport"
+CLASS_PRIORITY: dict[str, int] = {
+    "GT3": 1,
+    "Multiclass": 2,
+    "Hyper": 3,
+    "LMP2": 4,
+    "GT4": 5,
+    "Fixed": 6,
+    "Unknown": 99,
+}
 
 SIM_HASHTAGS: dict[str, str] = {
     "Automobilista 2": "AMS2",
@@ -57,6 +66,27 @@ def _ordered_sims(sims: set[str]) -> list[str]:
     return ordered
 
 
+def _format_duration(mins: int) -> str:
+    h = mins // 60
+    m = mins % 60
+    if h and m:
+        return f"{h}h{m}m"
+    if h:
+        return f"{h}h"
+    return f"{m}m"
+
+
+def _duration_text_for_card(race: dict[str, Any]) -> str:
+    raw = race.get("duration_raw")
+    if isinstance(raw, int):
+        return _format_duration(raw)
+
+    text = str(race.get("duration") or "").strip()
+    if text.endswith(" min"):
+        text = text[: -len(" min")].strip()
+    return text or "0m"
+
+
 def _rank_line(race: dict[str, Any]) -> str | None:
     requirements = race.get("requirements")
     if not isinstance(requirements, dict):
@@ -80,7 +110,7 @@ def render_daily_race(race: dict[str, Any]) -> list[str]:
     track = (race.get("track") or "Unknown track").strip()
     race_class = (race.get("class") or "").strip() or "Unknown class"
     car = (race.get("car") or "").strip()
-    duration = (race.get("duration") or "0").strip()
+    duration = _duration_text_for_card(race)
     lines = [
         title,
         f"📍 {track}",
@@ -88,13 +118,20 @@ def render_daily_race(race: dict[str, Any]) -> list[str]:
     ]
     if race_class.lower() == "fixed" and car:
         lines.append(f"🚗 {car}")
-    lines.append(f"⏱ {duration} min")
+    lines.append(f"⏱ {duration}")
+    interval = (race.get("interval") or "").strip()
+    race_type = str(race.get("type") or "").strip().lower()
+    if interval and race_type == "daily":
+        lines.append(f"🔁 Every {interval}")
     return lines
 
 
 def render_weekly_race(race: dict[str, Any]) -> list[str]:
     lines = render_daily_race(race)
     lines.append(f"🕐 Starts in {race.get('next_start_in') or '0m'}")
+    interval = (race.get("interval") or "").strip()
+    if interval:
+        lines.append(f"🔁 Every {interval}")
     rank = _rank_line(race)
     if rank:
         lines.append(rank)
@@ -117,7 +154,7 @@ def build_lfm_simulation_messages(
     if ref.tzinfo is None:
         ref = ref.replace(tzinfo=timezone.utc)
 
-    series_list = build_series_from_races(flat_events)
+    series_list = build_aggregated_series(flat_events)
     filtered_series = filter_series(series_list)
 
     sim_cards: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -141,6 +178,7 @@ def build_lfm_simulation_messages(
         if not duration_text:
             raw_duration = item.get("duration")
             duration_text = str(raw_duration).strip() if raw_duration is not None else "0"
+        duration_raw = item.get("duration")
         starts_in_text = str(item.get("starts_in_text") or "").strip() or "0m"
         interval_text = item.get("interval_text")
         interval_label = str(interval_text).strip() if interval_text is not None else None
@@ -160,6 +198,7 @@ def build_lfm_simulation_messages(
                 "car": race_car,
                 "type": race_type,
                 "duration": duration_text,
+                "duration_raw": duration_raw,
                 "next_start_in": starts_in_text,
                 "interval": interval_label or None,
                 "requirements": requirements,
@@ -176,9 +215,8 @@ def build_lfm_simulation_messages(
             continue
         cards.sort(
             key=lambda c: (
-                0 if c.get("type") == "weekly" else 1,
-                c.get("_sort_key") if c.get("type") == "weekly" else datetime.max.replace(tzinfo=timezone.utc),
-                (c.get("title") or "").strip().lower(),
+                CLASS_PRIORITY.get(str(c.get("class") or "Unknown"), 50),
+                c.get("_sort_key") if isinstance(c.get("_sort_key"), datetime) else datetime.max.replace(tzinfo=timezone.utc),
             ),
         )
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
@@ -56,9 +56,41 @@ def _first_non_empty_str(*values: Any) -> str:
     return ""
 
 
-def build_series_from_races(races: list[dict]) -> list[dict]:
+def _most_common_duration(items: list[dict[str, Any]]) -> int | str | None:
+    durations: list[int] = []
+    raw_fallback: Any = None
+    for race in items:
+        value = race.get("duration")
+        if value is None:
+            value = race.get("race_length")
+        if raw_fallback is None and value is not None:
+            raw_fallback = value
+        parsed = _as_int(value)
+        if parsed is not None:
+            durations.append(parsed)
+    if durations:
+        return Counter(durations).most_common(1)[0][0]
+    return raw_fallback
+
+
+def _stable_interval_minutes(start_times: list[datetime]) -> int | None:
+    if len(start_times) < 2:
+        return None
+    deltas = [
+        int((start_times[i + 1] - start_times[i]).total_seconds() // 60)
+        for i in range(len(start_times) - 1)
+    ]
+    if not deltas or deltas[0] <= 0:
+        return None
+    # Irregular schedules should not expose an "Every X" interval.
+    if any(delta != deltas[0] for delta in deltas[1:]):
+        return None
+    return deltas[0]
+
+
+def build_aggregated_series(races: list[dict]) -> list[dict]:
     """
-    Aggregate raw race events into one card-like entity per (sim, source, series).
+    Aggregate raw race events into one card-like entity per grouped series session.
 
     Output schema:
     {
@@ -76,7 +108,7 @@ def build_series_from_races(races: list[dict]) -> list[dict]:
     """
     logger.info(f"[AGG] total races: {len(races)}")
 
-    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    grouped: dict[tuple[str, str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for race in races:
         if not isinstance(race, dict):
             continue
@@ -88,34 +120,38 @@ def build_series_from_races(races: list[dict]) -> list[dict]:
             race.get("title"),
             "Unknown series",
         )
-        grouped[(sim, source, series)].append(race)
+        track = _first_non_empty_str(race.get("track"))
+        race_class = _first_non_empty_str(race.get("class"), "Unknown")
+        car = _first_non_empty_str(race.get("car"))
+        grouped[(sim, source, series, track, race_class, car)].append(race)
 
     now = datetime.now(timezone.utc)
     series_list: list[dict[str, Any]] = []
 
-    for (sim, source, series), items in grouped.items():
-        parsed_times: list[datetime] = []
+    for (sim, source, series, track, race_class, car), items in grouped.items():
+        first = items[0] if items else {}
+        if not first:
+            logger.warning("[series_builder] empty events list")
+        parsed_group: list[tuple[datetime, dict[str, Any]]] = []
         for race in items:
             st = _parse_start_time(race.get("startTime"))
             if st is not None:
-                parsed_times.append(st)
-        if not parsed_times:
+                parsed_group.append((st, race))
+        if not parsed_group:
             continue
 
-        start_times = sorted(parsed_times)
-        next_start = get_next_start(start_times, now)
+        parsed_group.sort(key=lambda item: item[0])
+        start_times = [st for st, _ in parsed_group]
+        future_group = [(st, race) for st, race in parsed_group if st >= now]
+        next_start, next_race = future_group[0] if future_group else parsed_group[0]
         starts_in_minutes = get_starts_in_minutes(now, next_start)
-        interval_minutes = get_interval_minutes(start_times)
+        interval_minutes = _stable_interval_minutes(start_times)
         logger.debug(
             f"[TIME] next={next_start}, starts_in={starts_in_minutes}, interval={interval_minutes}",
         )
 
-        first = items[0]
-        duration_val: Any = first.get("duration")
-        if duration_val is None:
-            duration_val = first.get("race_length")
-        parsed_duration = _as_int(duration_val)
-        duration = parsed_duration if parsed_duration is not None else duration_val
+        duration = _most_common_duration(items)
+        parsed_duration = _as_int(duration)
         duration_text = format_minutes(parsed_duration) if parsed_duration is not None else ""
         starts_in_text = format_starts_in(starts_in_minutes)
         interval_text = (
@@ -126,34 +162,38 @@ def build_series_from_races(races: list[dict]) -> list[dict]:
         logger.debug(
             f"[SERIES] {series} starts_in={starts_in_minutes} interval={interval_minutes}",
         )
-
-        track = _first_non_empty_str(first.get("track"))
-        race_class = _first_non_empty_str(first.get("class"), "Unknown")
-        car = _first_non_empty_str(first.get("car"))
+        race_type = _first_non_empty_str(next_race.get("type"), first.get("type"), "daily")
+        requirements = first.get("requirements") if isinstance(first, dict) else None
 
         series_list.append(
             {
                 "sim": sim,
                 "source": source,
                 "series": series,
-                "type": first.get("type"),
+                "type": race_type,
                 "track": track,
                 "duration": duration,
                 "next_start": next_start,
                 "starts_in_minutes": starts_in_minutes,
                 "interval_minutes": interval_minutes,
+                "interval_min": interval_minutes,
                 "starts_in_text": starts_in_text,
                 "interval_text": interval_text,
                 "duration_text": duration_text,
                 "events_count": len(items),
                 "class": race_class,
                 "car": car or None,
-                "requirements": first.get("requirements"),
+                "requirements": requirements,
             },
         )
 
     logger.info(f"[AGG] total series: {len(series_list)}")
     return series_list
+
+
+def build_series_from_races(races: list[dict]) -> list[dict]:
+    """Backward-compatible alias."""
+    return build_aggregated_series(races)
 
 
 MAX_PER_SIM = 5
