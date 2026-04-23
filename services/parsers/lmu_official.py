@@ -1,4 +1,5 @@
 import re
+from collections import Counter
 from datetime import datetime, time, timedelta, timezone
 from typing import Any
 
@@ -133,27 +134,52 @@ def _extract_future_local_times(raw_times: object, now_local: datetime) -> list[
     return future
 
 
-def _safety_label_from_rank(raw: object) -> tuple[str | None, str | None]:
-    """Returns (raw_display, label) e.g. ('1.3x', 'SILVER')."""
-    if raw is None:
-        return None, None
-    text = str(raw).strip()
-    if not text:
-        return None, None
-    m = re.match(r"^([\d.]+)\s*x?\s*$", text, flags=re.IGNORECASE)
-    if not m:
-        return text, None
-    try:
-        value = float(m.group(1))
-    except ValueError:
-        return text, None
-    if value < 1.0:
-        label = "BRONZE"
-    elif value < 1.4:
-        label = "SILVER"
-    else:
-        label = "GOLD"
-    return text, label
+def _sr_multiplier_display(race: dict[str, Any]) -> str | None:
+    """Raw SR multiplier string only — never used to infer tier."""
+    for key in ("safetyRank", "safetyRating", "sr"):
+        raw = race.get(key)
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if text:
+            return text
+    return None
+
+
+def _extract_tier_from_event(race: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Return (tier, source_key) from raw LMU fields only (no SR inference)."""
+    for key in ("licenseLevel", "driverCategory", "category"):
+        value = race.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip(), key
+
+    candidate_keys = (
+        "rank",
+        "split",
+        "skillLevel",
+        "license",
+    )
+    for key in candidate_keys:
+        value = race.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip(), key
+
+    for parent_key in ("requirements", "entryRequirements", "restriction", "rules"):
+        parent = race.get(parent_key)
+        if not isinstance(parent, dict):
+            continue
+        nested = (
+            parent.get("licenseLevel")
+            or parent.get("driverCategory")
+            or parent.get("category")
+        )
+        if isinstance(nested, str) and nested.strip():
+            return nested.strip(), f"{parent_key}.(licenseLevel|driverCategory|category)"
+        for key in candidate_keys:
+            value = parent.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip(), f"{parent_key}.{key}"
+    return None, None
 
 
 class LMUOfficialParser(BaseParser):
@@ -197,21 +223,46 @@ class LMUOfficialParser(BaseParser):
             logger.error(f"[LMU] error: {err}")
             raise err
         print(f"LMU API returned {len(data)} races")
+        print(f"[LMU] RAW races count: {len(data)}")
+        for race in data:
+            if not isinstance(race, dict):
+                print("[LMU RAW] non-dict race:", race)
+                continue
+            print(
+                "[LMU RAW]",
+                {
+                    "name": race.get("name"),
+                    "series": race.get("series"),
+                    "track": race.get("track") or race.get("circuit"),
+                    "class": race.get("carClass") or race.get("carClasses"),
+                    "duration": race.get("duration") or race.get("raceLength"),
+                    "skill": race.get("skillLevel"),
+                    "license": race.get("license"),
+                    "sr": race.get("safetyRating") or race.get("safetyRank"),
+                    "start": race.get("startTime") or race.get("times"),
+                },
+            )
 
         logger.info(f"[LMU] parsed items: {len(data)}")
 
         now_local = datetime.now().astimezone()
         races: list[dict[str, Any]] = []
+        parsed_races: list[dict[str, Any]] = []
 
         for race in data:
+            print("[LMU RAW BEFORE PARSING]", race)
+            print("[LMU RAW EVENT]", race)
             if not isinstance(race, dict):
+                print("[LMU SKIPPED] race is not dict:", race)
                 continue
             race_type = race.get("raceType")
             if race_type not in LMU_ALLOWED_RACE_TYPES:
+                print("[LMU DROP] unsupported raceType", {"raceType": race_type, "race": race})
                 continue
 
             future_times = _extract_future_local_times(race.get("times"), now_local)
             if not future_times:
+                print("[LMU DROP] missing/empty future times", race)
                 continue
 
             next_start = future_times[0]
@@ -238,47 +289,70 @@ class LMUOfficialParser(BaseParser):
                 race_class = None
             else:
                 race_class = str(raw_classes).strip() or None
+            if not race_class:
+                print("[LMU DROP] missing carClass", race)
+                continue
 
             title_value = race.get("series")
             title = str(title_value).strip() if title_value is not None else None
             if title == "":
                 title = None
+            if not title:
+                print("[LMU DROP] missing series/title", race)
+                continue
 
             duration_value = race.get("raceLength")
             duration = str(duration_value).strip() if duration_value is not None else None
             if duration == "":
                 duration = None
+            if not duration:
+                print("[LMU DROP] missing duration", race)
+                continue
 
-            safety_raw, safety_label = _safety_label_from_rank(race.get("safetyRank"))
-            requirements: dict[str, str] | None = None
-            if safety_label is not None:
-                requirements = {"safety": safety_label}
-                if safety_raw:
-                    requirements["safety_raw"] = safety_raw
+            tier, tier_field = _extract_tier_from_event(race)
+            sr_multiplier = _sr_multiplier_display(race)
+            if tier is None:
+                tier = "Unknown"
+                print("[LMU WARNING] No tier found in event", race)
+            requirements: dict[str, str] | None = {}
+            requirements["license"] = tier
+            if sr_multiplier:
+                requirements["safety_raw"] = sr_multiplier
+            print(
+                f"[LMU DEBUG] tier={tier}, field={tier_field}, sr={sr_multiplier}, raw={race}",
+            )
+            print(f"[LMU PIPELINE] stage=parser tier={tier}")
 
             type_norm = "daily" if race_type == "Daily Races" else "weekly"
 
-            races.append(
-                {
-                    "game": "lmu",
-                    "source": "official",
-                    "type": type_norm,
-                    "title": title,
-                    "track": track,
-                    "layout": layout,
-                    "class": race_class,
-                    "laps": None,
-                    "duration": duration,
-                    "tires": None,
-                    "car": None,
-                    "start_time": next_start.isoformat(),
-                    "next_start_in": next_start_in,
-                    "interval": interval,
-                    "requirements": requirements,
-                    "uid": _build_uid("lmu", title, track),
-                }
-            )
+            parsed = {
+                "game": "lmu",
+                "source": "official",
+                "type": type_norm,
+                "title": title,
+                "track": track,
+                "layout": layout,
+                "class": race_class,
+                "laps": None,
+                "duration": duration,
+                "tires": None,
+                "car": None,
+                "start_time": next_start.isoformat(),
+                "next_start_in": next_start_in,
+                "interval": interval,
+                "tier": tier,
+                "tier_field": tier_field,
+                "sr_multiplier": sr_multiplier,
+                "requirements": requirements,
+                "uid": _build_uid("lmu", title, track),
+            }
+            print("[LMU PARSED]", parsed)
+            parsed_races.append(parsed)
+            races.append(parsed)
 
+        print(f"[LMU] FINAL races count: {len(parsed_races)}")
+        series_counter = Counter(str(r.get("title") or "") for r in parsed_races)
+        print("[LMU SERIES DISTRIBUTION]", dict(series_counter))
         logger.info(f"[LMU] normalized races: {len(races)}")
         if not races:
             logger.warning("[LMU] no races generated")

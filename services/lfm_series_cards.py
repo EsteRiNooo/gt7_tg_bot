@@ -77,6 +77,12 @@ def _format_duration(mins: int) -> str:
 
 
 def _duration_text_for_card(race: dict[str, Any]) -> str:
+    laps = race.get("laps")
+    if isinstance(laps, int) and laps > 0:
+        return f"{laps}L"
+    if isinstance(laps, str) and laps.strip().isdigit() and int(laps.strip()) > 0:
+        return f"{int(laps.strip())}L"
+
     raw = race.get("duration_raw")
     if isinstance(raw, int):
         return _format_duration(raw)
@@ -91,18 +97,50 @@ def _rank_line(race: dict[str, Any]) -> str | None:
     requirements = race.get("requirements")
     if not isinstance(requirements, dict):
         return None
-    for key in ("license", "rank", "safety"):
-        value = requirements.get(key)
-        if value is None:
-            continue
-        text = str(value).strip()
-        if not text:
-            continue
-        # Hide noisy numeric-only values (e.g. 4, 3.5)
-        if all(ch.isdigit() or ch == "." for ch in text):
-            continue
-        return f"🏆 {text}"
-    return None
+
+    license_value = requirements.get("license")
+    safety_value = requirements.get("safety")
+    license_text = str(license_value).strip() if license_value is not None else ""
+    safety_text = str(safety_value).strip() if safety_value is not None else ""
+
+    if safety_text and all(ch.isdigit() or ch == "." for ch in safety_text):
+        safety_text = f"SR {safety_text}"
+
+    if not license_text and not safety_text:
+        return None
+
+    low = license_text.lower()
+    icon = "🏆"
+    if "rookie" in low:
+        icon = "🟢"
+    elif "iron" in low:
+        icon = "🟡"
+    elif "bronze" in low:
+        icon = "🔴"
+
+    if license_text and safety_text:
+        return f"{icon} {license_text} ({safety_text})"
+    if license_text:
+        return f"{icon} {license_text}"
+    return f"{icon} {safety_text}"
+
+
+def _class_with_duration_line(race: dict[str, Any]) -> str:
+    race_class = (race.get("class") or "").strip() or "Unknown class"
+    duration = _duration_text_for_card(race)
+    if duration:
+        return f"🏁 {race_class} • {duration}"
+    return f"🏁 {race_class}"
+
+
+def _status_emoji(race: dict[str, Any]) -> str:
+    starts_in = str(race.get("next_start_in") or "").strip().lower()
+    if starts_in in {"now", "0m"}:
+        return "🔥"
+    race_type = str(race.get("type") or "").strip().lower()
+    if race_type == "weekly":
+        return "⚡"
+    return "📅"
 
 
 def render_daily_race(race: dict[str, Any]) -> list[str]:
@@ -110,31 +148,23 @@ def render_daily_race(race: dict[str, Any]) -> list[str]:
     track = (race.get("track") or "Unknown track").strip()
     race_class = (race.get("class") or "").strip() or "Unknown class"
     car = (race.get("car") or "").strip()
-    duration = _duration_text_for_card(race)
+    class_with_duration = _class_with_duration_line(race)
     lines = [
-        title,
+        f"{_status_emoji(race)} {title}",
         f"📍 {track}",
-        f"🏁 {race_class}",
+        class_with_duration,
     ]
     if race_class.lower() == "fixed" and car:
         lines.append(f"🚗 {car}")
-    lines.append(f"⏱ {duration}")
-    interval = (race.get("interval") or "").strip()
-    race_type = str(race.get("type") or "").strip().lower()
-    if interval and race_type == "daily":
-        lines.append(f"🔁 Every {interval}")
+    rank = _rank_line(race)
+    if rank:
+        lines.append(rank)
     return lines
 
 
 def render_weekly_race(race: dict[str, Any]) -> list[str]:
     lines = render_daily_race(race)
-    lines.append(f"🕐 Starts in {race.get('next_start_in') or '0m'}")
-    interval = (race.get("interval") or "").strip()
-    if interval:
-        lines.append(f"🔁 Every {interval}")
-    rank = _rank_line(race)
-    if rank:
-        lines.append(rank)
+    lines.append(f"⏱ Starts in {race.get('next_start_in') or '0m'}")
     return lines
 
 
