@@ -333,7 +333,7 @@ class LMUOfficialParser(BaseParser):
 
             parsed = {
                 "game": "lmu",
-                "source": "official",
+                "source": "lmu_official",
                 "type": type_norm,
                 "title": title,
                 "track": track,

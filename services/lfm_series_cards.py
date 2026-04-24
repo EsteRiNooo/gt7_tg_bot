@@ -250,9 +250,10 @@ def build_lfm_simulation_messages(
             ),
         )
 
+        sim_heading = "LFM LMU" if sim == "Le Mans Ultimate" else sim
         lines: list[str] = [
             _lfm_message_tag(sim),
-            f"{sim} | {LFM_SOURCE_LINE}",
+            f"{sim_heading} | {LFM_SOURCE_LINE}",
             "",
         ]
 

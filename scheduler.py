@@ -1,16 +1,19 @@
 import hashlib
 import json
 from pathlib import Path
+from typing import Any
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.types import FSInputFile, InputMediaPhoto
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from services.formatting import append_source_errors, format_full_week
-from services.races import get_current_races_with_errors
+from services.races import get_all_races
 from services.subscribers import list_subscribers, remove_subscriber
-from services.track_images import find_track_image
+from services.user_race_settings import (
+    aggregated_results_have_any_races,
+    filter_races_by_user_settings,
+)
+from services.week_races_delivery import deliver_filtered_week_to_chat
 
 HASH_FILE = Path("data/last_hash.txt")
 
@@ -44,35 +47,41 @@ def _write_last_hash(value: str) -> None:
     HASH_FILE.write_text(value, encoding="utf-8")
 
 
-def _build_race_hash(races: list[dict[str, str | None]]) -> str:
-    ordered_races = _ordered_races(races)
-    payload = [
-        {
-            "title": race.get("title"),
-            "track": race.get("track"),
-            "class": race.get("class"),
-            "tires": race.get("tires"),
-            "laps": race.get("laps"),
-            "car": race.get("car"),
-        }
-        for race in ordered_races
-    ]
-    return hashlib.sha256(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    ).hexdigest()
+def _collect_source_errors(results: list[dict[str, Any]]) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    for item in results:
+        err = item.get("error")
+        if not err:
+            continue
+        out.append(
+            {
+                "source": str(item.get("source") or "unknown"),
+                "error": str(err),
+            },
+        )
+    return out
 
 
-def _ordered_races(races: list[dict[str, str | None]]) -> list[dict[str, str | None]]:
-    race_order = {"Race A": 0, "Race B": 1, "Race C": 2}
-    return sorted(races, key=lambda race: race_order.get((race.get("title") or "").strip(), 99))
+def _build_aggregated_week_hash(results: list[dict[str, Any]]) -> str:
+    """Fingerprint full normalized week (all parsers) for change detection."""
+    payload: list[dict[str, Any]] = []
+    for item in sorted(results, key=lambda x: str(x.get("source") or "")):
+        payload.append(
+            {
+                "source": item.get("source"),
+                "error": item.get("error"),
+                "data": item.get("data"),
+            },
+        )
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 async def send_weekly_races(bot: Bot, force: bool = False) -> None:
     print("Checking weekly races...")
 
-    races, errors = await get_current_races_with_errors()
-    races = _ordered_races(races)
-    races_hash = _build_race_hash(races)
+    results = await get_all_races()
+    races_hash = _build_aggregated_week_hash(results)
     old_hash = _read_last_hash()
 
     if not force and races_hash == old_hash:
@@ -86,10 +95,20 @@ async def send_weekly_races(bot: Bot, force: bool = False) -> None:
 
     print("Sending new weekly update")
 
+    errors = _collect_source_errors(results)
     sent_any = False
     for user_id in user_ids:
+        filtered = filter_races_by_user_settings(results, user_id)
+        if not aggregated_results_have_any_races(filtered):
+            print(f"Weekly update skipped for {user_id}: no races after source filters.")
+            continue
         try:
-            await _send_weekly_message(bot=bot, user_id=user_id, races=races, errors=errors)
+            await deliver_filtered_week_to_chat(
+                bot,
+                user_id,
+                filtered_results=filtered,
+                source_errors=errors or None,
+            )
             sent_any = True
         except TelegramForbiddenError:
             remove_subscriber(user_id)
@@ -101,26 +120,3 @@ async def send_weekly_races(bot: Bot, force: bool = False) -> None:
 
     if sent_any:
         _write_last_hash(races_hash)
-
-
-async def _send_weekly_message(
-    bot: Bot, user_id: int, races: list[dict[str, str | None]], errors: list[dict[str, str]]
-) -> None:
-    full_text = format_full_week(races)
-    full_text = append_source_errors(full_text, errors)
-    image_paths = [find_track_image((race.get("track") or "").strip()) for race in races]
-    valid_image_paths = [path for path in image_paths if path]
-
-    if not valid_image_paths:
-        await bot.send_message(user_id, full_text, parse_mode="HTML")
-        return
-
-    media: list[InputMediaPhoto] = []
-    for index, path in enumerate(valid_image_paths):
-        photo = FSInputFile(path)
-        if index == 0:
-            media.append(InputMediaPhoto(media=photo, caption=full_text, parse_mode="HTML"))
-        else:
-            media.append(InputMediaPhoto(media=photo))
-
-    await bot.send_media_group(user_id, media=media)

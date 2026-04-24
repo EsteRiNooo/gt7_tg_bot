@@ -600,12 +600,13 @@ def flatten_lfm_week_events(
                 if earliest is None or latest is None or every is None:
                     continue
 
+                lfm_row_source = "lfm_lmu" if sim == "Le Mans Ultimate" else "lfm"
                 for d in week_dates:
                     for start in _iter_daily_starts(d, earliest, latest, every, tz):
                         generated_before += 1
                         row: dict[str, Any] = {
                             "sim": sim,
-                            "source": "lfm",
+                            "source": lfm_row_source,
                             "series": title,
                             "track": track,
                             "class": class_label,
@@ -623,12 +624,13 @@ def flatten_lfm_week_events(
                         events.append(row)
 
             else:  # weekly
+                lfm_row_source_w = "lfm_lmu" if sim == "Le Mans Ultimate" else "lfm"
                 for start in _weekly_race_times(series):
                     generated_before += 1
                     local_start = start.astimezone(tz)
                     row_w: dict[str, Any] = {
                         "sim": sim,
-                        "source": "lfm",
+                        "source": lfm_row_source_w,
                         "series": title,
                         "track": track,
                         "class": class_label,
